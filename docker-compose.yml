@@ -1,5 +1,17 @@
 version: "3"
 services:
+  solid_queue:
+    build: .
+    stdin_open: true
+    tty: true
+    command: bundle exec rake solid_queue:start
+    depends_on:
+      - database
+    environment:
+      - DATABASE_URL=postgresql://postgres@database
+    volumes:
+      - .:/usr/src/app
+      
   database:
     image: postgres
     ports:
