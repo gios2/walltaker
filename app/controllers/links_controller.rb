@@ -9,7 +9,7 @@ class LinksController < ApplicationController
   before_action :authorize, only: %i[index new edit create destroy]
 
   # 2. set @link instance var, since a lot of action filters use it
-  before_action :set_link, only: %i[show edit update destroy export toggle_ability embed]
+  before_action :set_link, only: %i[show edit update destroy export toggle_ability embed show_similar]
 
   # 3. protect link-specific buisness rules
   before_action :prevent_public_expired, only: %i[show update]
@@ -33,6 +33,19 @@ class LinksController < ApplicationController
     @links = User.find(current_user.id).link
   end
 
+  def show_similar
+    query = Link.order('RANDOM()').where.not(id: @link.id).is_public
+    random_link = nil
+    random_link = query.is_online.find_by(theme: @link.theme) if @link.theme
+    random_link = query.is_online.includes(:user, user: [:kinks]).find_by(user: { kinks: @link.user.kinks.pluck(:id) }) if @link.user.kinks.count > 0 && random_link.nil?
+    random_link = query.is_online.take if random_link.nil?
+    random_link = query.take if random_link.nil?
+
+    return redirect_back_or_to root_path, alert: 'No other link was found... somehow.' if random_link.nil?
+
+    redirect_to link_path(random_link)
+  end
+
   # GET /browse (all online links)
   def browse
     # FUCK YOU, I join what I want, get ready for the query from hell
@@ -50,15 +63,18 @@ class LinksController < ApplicationController
           .pluck(:id)
     end
 
-    @new_user_links = Link.joins(:user).is_public.is_online.where('users.created_at': 12.hours.ago..Time.now).order('RANDOM()').limit(3)
-    @links = Link.where(id: science_links)
+    @new_user_links = Link.includes(:abilities).joins(:user).is_public.is_online.where('users.created_at': 12.hours.ago..Time.now).order('RANDOM()').limit(3)
+    @links = Link.includes(:abilities, :user, user: [:kinks]).where(id: science_links)
   end
 
   # GET /links/1 or /links/1.json
   def show
     @has_friendship = Friendship.find_friendship(current_user, @link.user).exists? if current_user
-    @set_by = User.find(@link.set_by_id) if @link.set_by_id && request.format == :json
+    @set_by = @link.set_by if @link.set_by_id && request.format == :json
     @is_current_user = (current_user && (current_user.id == @link.user.id))
+
+    HistoryEvent.record(current_user, :looked_at, @link, nil, current_visit) if current_user && !surrender_controller
+    HistoryEvent.record(current_user, :looked_at, @link, surrender_controller, current_visit) if surrender_controller
   end
 
   # GET /links/new
@@ -133,6 +149,8 @@ class LinksController < ApplicationController
                                   if current_user&.current_surrender
                                     Notification.create user: current_user, notification_type: :surrender_event, link: link_path(@link), text: "#{current_user.current_surrender.controller.username} set a new wallpaper for #{@link.user.username}"
                                   end
+                                  HistoryEvent.record(current_user, :set_wallpaper, @link, nil, current_visit) if current_user && !surrender_controller
+                                  HistoryEvent.record(current_user, :set_wallpaper, @link, surrender_controller, current_visit) if surrender_controller
                                   assign_e621_post_to_self e621_post, @link
                                 end
 
@@ -243,7 +261,7 @@ class LinksController < ApplicationController
     end
 
     if params['background'].present? && (/[\dA-Fa-f]+/).match?(params['background'])
-        @background = '#' + params['background']
+      @background = '#' + params['background']
     end
 
     if params['hide_text'].present? && params['hide_text'] == 'true'
@@ -281,9 +299,9 @@ class LinksController < ApplicationController
   # Use callbacks to share common setup or constraints between actions.
   def set_link
     if params[:id].match? /\D+/
-      @link = Link.find_by(custom_url: params[:id])
+      @link = Link.joins(:user).left_joins(:set_by).find_by(custom_url: params[:id])
     else
-      @link = Link.find(params[:id])
+      @link = Link.joins(:user).left_joins(:set_by).find(params[:id])
     end
   end
 
@@ -324,27 +342,32 @@ class LinksController < ApplicationController
   end
 
   def assign_e621_post_to_self(e621_post, link)
+    track :regular, :update_link_post, attempted_post_id: params['link'][:post_id]
+    set_by = current_user || nil
+    e621_service = E621.new
+
     link.update(
       {
         post_url: e621_post['file']['url'],
         post_thumbnail_url: e621_post['sample']['url'] || e621_post['preview']['url'],
         post_description: e621_post['description'],
-        set_by_id: current_user.nil? ? nil : current_user.id,
+        set_by_id: set_by.nil? ? nil : set_by.id,
         response_type: nil,
         response_text: nil
       }
     )
     link.forks.each do |fork|
-      result = get_post e621_post['id'], fork
-      assign_e621_post_to_self result, fork if result
+      result = e621_service.get_post e621_post['id'], fork
+      SetLinkJob.set(wait: 1.second, priority: 10).perform_later(e621_post: result, link: fork, set_by:) if result
+    rescue
+      track :error, :bad_fork, fork_id: fork.id, post_id: e621_post['id']
     end
-    track :regular, :update_set_count, current_user_id: current_user&.id, link_owner_id: link.user.id, current_user_set_count_before_inc: current_user&.set_count
-    if current_user.present? && (link.user.id != current_user.id)
-      current_user.set_count = current_user.set_count.to_i + 1
-      current_user.save
+    if set_by.present? && (link.user.id != set_by.id)
+      set_by.set_count = set_by.set_count.to_i + 1
+      set_by.save
     end
-    past_link = PastLink.log_link(link)
+    tag_string = "#{e621_post['tags']['general'].join(' ')} #{e621_post['tags']['character'].join(' ')} #{e621_post['tags']['species'].join(' ')} #{e621_post['tags']['lore'].join(' ')} #{e621_post['tags']['copyright'].join(' ')} #{e621_post['tags']['meta'].join(' ')} rating:#{e621_post['rating']}"
+    past_link = PastLink.log_link(link, tag_string)
     past_link.save
-    track :regular, :update_link_post, attempted_post_id: params['link'][:post_id], past_link_id: past_link.id
   end
 end

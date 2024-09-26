@@ -28,7 +28,7 @@
           </a>
           <%= link_to 'Links', links_path %>
           <%= link_to 'Friends', friendships_path, class: has_requests? ? 'pinged' : '' %>
-          <%= link_to 'Logout', logout_path %>
+          <%= link_to 'Logout', logout_path, data: { 'turbo-prefetch': 'false' } %>
 
           <div class="user-tools__nested">
             <%= link_to message_thread_index_path do %>
@@ -48,6 +48,9 @@
       </div>
     </div>
   </header>
+
+  <%= turbo_stream_from :chyron %>
+  <%= turbo_frame_tag :chyron %>
 
   <%= render 'application/flashes' %>
 
@@ -75,10 +78,9 @@
     </div>
   <% end %>
 
-  <main>
-    <%= yield %>
-    <%= yield :content %>
-  </main>
+  <%= tag.main class: content_for?(:main_class) ? yield(:main_class) : "" do %>
+    <%= content_for?(:content) ? yield(:content) : yield %>
+  <% end %>
 
   <footer>
     <p>
