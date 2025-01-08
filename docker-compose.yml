@@ -1,23 +1,16 @@
 version: "3"
 services:
-  solid_queue:
-    build: .
-    stdin_open: true
-    tty: true
-    command: bundle exec rake solid_queue:start
-    depends_on:
-      - database
-    environment:
-      - DATABASE_URL=postgresql://postgres@database
-    volumes:
-      - .:/usr/src/app
       
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
   database:
     image: postgres
     ports:
       - "5432:5432"
     volumes:
-      - ./.docker/volumes/walltaker_database2:/var/lib/postgresql/data
+      - postgres_db:/var/lib/postgresql/data
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_HOST_AUTH_METHOD=trust
@@ -30,5 +23,11 @@ services:
       - "3100:3000"
     depends_on:
       - database
+      - redis
     environment:
       - POSTGRES_USER=postgres
+      - REDIS_URL=redis://redis:6379/1
+      - SOLID_QUEUE_ADAPTER=redis
+      
+volumes:
+  postgres_db:
